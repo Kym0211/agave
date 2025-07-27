@@ -520,6 +520,14 @@ pub fn create_program_runtime_environment_v1<'a>(
         SyscallRemainingComputeUnits::vm
     )?;
 
+   // custom syscall: Can request several sysvars like Clock, Rent etc
+    register_feature_gated_function!(
+        result,
+        remaining_compute_units_syscall_enabled,
+        "bulk_sysvar_fetch",
+        SyscallRemainingComputeUnits::vm
+    )
+
     // Alt_bn128_compression
     register_feature_gated_function!(
         result,
@@ -1832,6 +1840,69 @@ declare_builtin_function!(
         Ok(0)
     }
 );
+
+// custom syscall: Can request several sysvars like Clock, Rent etc
+declare_builtin_function!(
+    SyscallBulkSysvarFetch,
+    fn rust(
+        invoke_context: &mut InvokeContext,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Error> {
+
+        // Read the requested sysvar IDs from guest memory:
+        let sysvar_list_ptr = arg1 as *const u8;
+        let sysvar_list_len = arg2 as usize;
+
+        // Translate guest memory address to host memory:
+        let sysvar_list_data = invoke_context.get_memory_slice(sysvar_list_ptr, sysvar_list_len, memory_mapping)
+            .ok_or_else(|| Error::AccountDataTooSmall)?;
+
+        // For simplicity, assume each sysvar ID is a u8 enum:
+        let sysvar_ids: &[u8] = sysvar_list_data;
+
+        // 2. Prepare a buffer to serialize all sysvar data into:
+        let output_ptr = arg3 as *mut u8;
+        let output_len = arg4 as usize;
+
+        let output_buffer = invoke_context.get_memory_slice_mut(output_ptr, output_len, memory_mapping)
+            .ok_or_else(|| Error::AccountDataTooSmall)?;
+
+        // For each sysvar ID: fetch the sysvar account and serialize:
+        let mut cursor = std::io::Cursor::new(output_buffer);
+
+        for &sysvar_id in sysvar_ids {
+            match sysvar_id {
+                // Use your own enum mapping; these are common sysvar IDs:
+                0 => {
+                    // Clock sysvar
+                    let clock = invoke_context.clock_sysvar()?;
+                    let clock_bytes = bincode::serialize(&clock).map_err(|_| Error::AccountDataTooSmall)?;
+                    cursor.write_all(&clock_bytes).map_err(|_| Error::AccountDataTooSmall)?;
+                }
+                1 => {
+                    // Rent sysvar
+                    let rent = invoke_context.rent_sysvar()?;
+                    let rent_bytes = bincode::serialize(&rent).map_err(|_| Error::AccountDataTooSmall)?;
+                    cursor.write_all(&rent_bytes).map_err(|_| Error::AccountDataTooSmall)?;
+                }
+                // Add other sysvars here as needed...
+
+                _ => {
+                    return Err(Error::InvalidArgument);
+                }
+            }
+        }
+
+        // Return total bytes written to output buffer:
+        Ok(cursor.position() as u64)
+    }
+)
+
 
 declare_builtin_function!(
     // Poseidon
